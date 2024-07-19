@@ -15,6 +15,15 @@ import rl "vendor:raylib"
 
 Gui_Id :: distinct u64
 
+Mouse_Button :: enum u32 {
+	Left,
+	Right,
+	Middle,
+}
+
+Mouse_Button_Set :: distinct bit_set[Mouse_Button; u32]
+
+
 
 GUI_State :: struct {
 	width, height: i32,
@@ -36,13 +45,16 @@ GUI_State :: struct {
 	active_out_time: f64,
 	last_pressed_id: Gui_Id,
 
-	mouse_down:     bool,
-	mouse_pressed:  bool,
-	mouse_released: bool,
+	mouse_down:     Mouse_Button_Set,
+	mouse_pressed:  Mouse_Button_Set,
+	mouse_released: Mouse_Button_Set,
 }
 
 
 Game_Table :: struct {
+	seed: u64,
+	difficulty: Difficulty,
+
 	opponent_deck: [dynamic]Card,
 	player_deck:   [dynamic]Card,
 
@@ -59,17 +71,21 @@ Game_Table :: struct {
 
 Control_Result :: enum u32 {
 	Click,
-	// Right_Click,
+	Right_Click,
+	Middle_Click,
 	Dragging,
 	Active_In,
 	Active_Out,
 	Hover_In,
 	Hover_Out,
+
+	Active,
+	Hover,
 }
 Control_Result_Set :: distinct bit_set[Control_Result; u32]
 
 @(require_results)
-update_control :: proc(gui: ^GUI_State, id: Gui_Id, rect: rl.Rectangle) -> (res: Control_Result_Set) {
+update_control :: proc(gui: ^GUI_State, id: Gui_Id, rect: rl.Rectangle, allowed_mouse_buttons := Mouse_Button_Set{.Left}) -> (res: Control_Result_Set) {
 	set_active :: proc(state: ^GUI_State, id: Gui_Id) {
 		state.active_id = id
 		state.updated_active = true
@@ -81,7 +97,10 @@ update_control :: proc(gui: ^GUI_State, id: Gui_Id, rect: rl.Rectangle) -> (res:
 
 	hovered := rl.CheckCollisionPointRec(gui.mouse_pos, rect)
 
-	if hovered && (!gui.mouse_down || gui.active_id == id) && gui.hover_id != id {
+	mouse_pressed  := (gui.mouse_pressed & allowed_mouse_buttons) == allowed_mouse_buttons
+	mouse_down     := (gui.mouse_down    & allowed_mouse_buttons) == allowed_mouse_buttons
+
+	if hovered && (!mouse_down || gui.active_id == id) && gui.hover_id != id {
 		set_hover(gui, id)
 		if gui.hover_id == id {
 			res += {.Hover_In}
@@ -89,11 +108,11 @@ update_control :: proc(gui: ^GUI_State, id: Gui_Id, rect: rl.Rectangle) -> (res:
 	}
 
 	if gui.active_id == id {
-		if gui.mouse_pressed && !hovered || !gui.mouse_down  {
+		if mouse_pressed && !hovered || !mouse_down  {
 			set_active(gui, 0)
 		} else {
 			gui.updated_active = true
-			if gui.mouse_down || gui.mouse_pressed {
+			if .Left in (gui.mouse_down + gui.mouse_pressed) {
 				res += {.Dragging}
 			}
 		}
@@ -101,7 +120,7 @@ update_control :: proc(gui: ^GUI_State, id: Gui_Id, rect: rl.Rectangle) -> (res:
 
 	if gui.hover_id == id {
 		gui.updated_hover = true
-		if gui.mouse_pressed && gui.active_id != id {
+		if mouse_pressed && gui.active_id != id {
 			set_active(gui, id)
 			res += {.Active_In}
 			gui.active_in_time = gui.current_time
@@ -117,8 +136,17 @@ update_control :: proc(gui: ^GUI_State, id: Gui_Id, rect: rl.Rectangle) -> (res:
 		gui.active_out_time = gui.current_time
 	}
 
-	if gui.hover_id == id && gui.mouse_pressed {
-		res += {.Click}
+	if gui.hover_id == id && gui.mouse_pressed != nil {
+		if mouse_pressed && .Left   in gui.mouse_pressed { res += {.Click}        }
+		if mouse_pressed && .Right  in gui.mouse_pressed { res += {.Right_Click}  }
+		if mouse_pressed && .Middle in gui.mouse_pressed { res += {.Middle_Click} }
+	}
+
+	if gui.hover_id == id {
+		res += {.Hover}
+	}
+	if gui.active_id == id {
+		res += {.Active}
 	}
 
 	return
@@ -132,9 +160,22 @@ gui_start :: proc(gui: ^GUI_State, render_width, render_height: i32) {
 	gui.current_time = rl.GetTime()
 	gui.delta_time = gui.current_time - prev_current_time
 
-	gui.mouse_down     = rl.IsMouseButtonDown(.LEFT)
-	gui.mouse_pressed  = rl.IsMouseButtonPressed(.LEFT)
-	gui.mouse_released = rl.IsMouseButtonPressed(.LEFT)
+	gui.mouse_down     = nil
+	gui.mouse_pressed  = nil
+	gui.mouse_released = nil
+
+	if rl.IsMouseButtonDown(.LEFT)    { gui.mouse_down += {.Left} }
+	if rl.IsMouseButtonPressed(.LEFT) { gui.mouse_pressed += {.Left} }
+	if rl.IsMouseButtonPressed(.LEFT) { gui.mouse_released += {.Left} }
+
+	if rl.IsMouseButtonDown(.RIGHT)    { gui.mouse_down += {.Right} }
+	if rl.IsMouseButtonPressed(.RIGHT) { gui.mouse_pressed += {.Right} }
+	if rl.IsMouseButtonPressed(.RIGHT) { gui.mouse_released += {.Right} }
+
+	if rl.IsMouseButtonDown(.MIDDLE)    { gui.mouse_down += {.Middle} }
+	if rl.IsMouseButtonPressed(.MIDDLE) { gui.mouse_pressed += {.Middle} }
+	if rl.IsMouseButtonPressed(.MIDDLE) { gui.mouse_released += {.Middle} }
+
 
 
 	{ // scale mouse position
@@ -314,7 +355,7 @@ Difficulty :: enum {
 	Hard,
 }
 
-init_table :: proc(table: ^Game_Table, difficulty: Difficulty) {
+init_table :: proc(table: ^Game_Table, difficulty: Difficulty, seed: Maybe(u64) = nil) {
 	make_card :: proc(value: Card_Value, suit: Card_Suit, back_texture: rl.Texture2D) -> Card {
 		if value == .Joker {
 			str := fmt.tprintf("card%s", card_value_texture_names[value])
@@ -373,6 +414,11 @@ init_table :: proc(table: ^Game_Table, difficulty: Difficulty) {
 		}
 	}
 
+	table.seed = seed.? or_else u64(time.time_to_unix(time.now()))
+	table.difficulty = difficulty
+	r := rand.create(table.seed)
+	context.random_generator = rand.default_random_generator(&r)
+
 	rand.shuffle(table.opponent_deck[:])
 	rand.shuffle(table.player_deck[:])
 
@@ -418,8 +464,6 @@ the_game :: proc(table: ^Game_Table, render_texture: rl.RenderTexture2D) {
 		}
 		return
 	}
-
-
 
 	center_overlay_text :: proc(gui: ^GUI_State, text: cstring) {
 		FONT_SIZE :: i32(128)
@@ -680,13 +724,12 @@ the_game :: proc(table: ^Game_Table, render_texture: rl.RenderTexture2D) {
 		corrected_rect.x -= origin.x
 		corrected_rect.y -= origin.y
 
-		id := Gui_Id(uintptr(&pc))
-		res := update_control(gui, id, corrected_rect)
+		res := update_control(gui, Gui_Id(uintptr(&pc)), corrected_rect)
 
-		switch id {
-		case gui.active_id:
+		switch {
+		case .Active in res:
 			tint = {255, 255, 205, 255}
-		case gui.hover_id:
+		case .Hover in res:
 			tint = {255, 245, 165, 255}
 		}
 
@@ -707,7 +750,7 @@ the_game :: proc(table: ^Game_Table, render_texture: rl.RenderTexture2D) {
 				for over, over_idx in over_any {
 					oc := &table.opponent_cards[over_idx]
 					if over {
-						if id != gui.active_id {
+						if .Active not_in res {
 							oc.health -= pc.health
 							if oc.health <= 0 {
 								table.force_player_draw_idx = pc_idx
@@ -761,9 +804,8 @@ the_game :: proc(table: ^Game_Table, render_texture: rl.RenderTexture2D) {
 		}
 
 
-		if id == gui.active_id {
+		if .Active in res {
 			pc.state = .Drag
-			tint = {255, 200, 165, 255}
 			if .Click in res {
 				pc.position = gui.mouse_pos - {rect.x, rect.y}
 			}
@@ -897,12 +939,9 @@ the_game :: proc(table: ^Game_Table, render_texture: rl.RenderTexture2D) {
 		tint := rl.Color{185, 255, 165, 255}
 		res := update_control(gui, id, rect)
 
-
-		if gui.hover_id == id {
-			tint = {195, 215, 125, 255}
-		}
-		if gui.active_id == id {
-			tint = {105, 150, 100, 255}
+		switch {
+		case .Active in res: tint = {105, 150, 100, 255}
+		case .Hover  in res: tint = {195, 215, 125, 255}
 		}
 
 		bg_rect := rect
@@ -922,6 +961,9 @@ the_game :: proc(table: ^Game_Table, render_texture: rl.RenderTexture2D) {
 	}
 	if .Click in new_game_button(gui, "New Hard Mode", 2) {
 		init_table(table, .Hard)
+	}
+	if .Click in new_game_button(gui, "Reset game", 4) {
+		init_table(table, table.difficulty, table.seed)
 	}
 
 
@@ -956,12 +998,8 @@ main :: proc() {
 	}
 	defer delete(card_textures)
 
-	seed := u64(time.time_to_unix(time.now()))
-	r := rand.create(seed)
-	context.random_generator = rand.default_random_generator(&r)
-
 	table: Game_Table
-	init_table(&table, .Easy)
+	init_table(&table, .Medium)
 
 	render_texture := rl.LoadRenderTexture(1920, 1080)
 	defer rl.UnloadRenderTexture(render_texture)
